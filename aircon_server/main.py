@@ -135,18 +135,22 @@ def login_page(request: Request):
     return """
 <!DOCTYPE html>
 <html lang="ja">
-
 <head>
 <meta charset="UTF-8">
-
-<meta
-    name="viewport"
-    content="width=device-width, initial-scale=1.0"
->
-
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>エアコンログイン</title>
 
 <style>
+:root {
+    --bg: #f7f8fc;
+    --card: rgba(255, 255, 255, 0.92);
+    --text: #2f3441;
+    --sub: #7d8597;
+    --line: #e6e9f2;
+    --accent: #9fb8ff;
+    --accent-strong: #7ea0ff;
+    --shadow: 0 20px 50px rgba(115, 130, 170, 0.12);
+}
 
 * {
     box-sizing: border-box;
@@ -154,120 +158,151 @@ def login_page(request: Request):
 
 body {
     margin: 0;
-    padding: 30px 20px;
-    background: #f5f5f7;
-    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    min-height: 100vh;
+    padding: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background:
+        radial-gradient(circle at top left, #eef3ff 0%, transparent 35%),
+        radial-gradient(circle at bottom right, #fceff4 0%, transparent 30%),
+        var(--bg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    color: var(--text);
 }
 
-.container {
+.card {
+    width: 100%;
     max-width: 420px;
-    margin: 80px auto;
-    padding: 35px;
-    background: white;
-    border-radius: 25px;
+    background: var(--card);
+    border: 1px solid rgba(255,255,255,0.7);
+    backdrop-filter: blur(12px);
+    border-radius: 28px;
+    box-shadow: var(--shadow);
+    padding: 36px 28px 30px;
     text-align: center;
-    box-shadow: 0 8px 30px rgba(0,0,0,0.08);
+}
+
+.icon {
+    width: 72px;
+    height: 72px;
+    margin: 0 auto 20px;
+    border-radius: 24px;
+    background: linear-gradient(135deg, #dfe8ff, #f5e8f2);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 34px;
 }
 
 h1 {
-    margin-bottom: 35px;
+    margin: 0 0 8px;
+    font-size: 32px;
+    font-weight: 800;
+    letter-spacing: 0.02em;
+}
+
+p {
+    margin: 0 0 24px;
+    color: var(--sub);
+    font-size: 15px;
+    line-height: 1.7;
+}
+
+.input-wrap {
+    text-align: left;
+    margin-bottom: 14px;
+}
+
+.label {
+    font-size: 13px;
+    color: var(--sub);
+    margin-bottom: 8px;
+    display: block;
 }
 
 input {
     width: 100%;
-    padding: 18px;
-    font-size: 18px;
-    border: 1px solid #ccc;
-    border-radius: 14px;
-    margin-bottom: 20px;
+    padding: 16px 18px;
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    background: #fbfcff;
+    font-size: 17px;
+    outline: none;
+    transition: 0.2s;
+}
+
+input:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 4px rgba(159, 184, 255, 0.18);
+    background: white;
 }
 
 button {
     width: 100%;
-    padding: 18px;
+    margin-top: 8px;
+    padding: 16px;
     border: none;
-    border-radius: 14px;
-    background: #4f7ee8;
+    border-radius: 16px;
+    background: linear-gradient(135deg, #a8bcff, #8fafee);
     color: white;
-    font-size: 20px;
+    font-size: 18px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: 0.15s;
+}
+
+button:active {
+    transform: scale(0.98);
 }
 
 #error {
-    margin-top: 20px;
-    color: red;
+    margin-top: 16px;
+    min-height: 24px;
+    font-size: 14px;
+    color: #d96b7c;
 }
-
 </style>
 </head>
 
 <body>
+<div class="card">
+    <div class="icon">❄️</div>
+    <h1>エアコン</h1>
+    <p>共有パスワードを入力して<br>操作画面へ進んでください</p>
 
-<div class="container">
+    <div class="input-wrap">
+        <label class="label">パスワード</label>
+        <input id="password" type="password" placeholder="パスワードを入力">
+    </div>
 
-<h1>エアコン</h1>
-
-<input
-    id="password"
-    type="password"
-    placeholder="パスワード"
->
-
-<button onclick="login()">
-ログイン
-</button>
-
-<div id="error"></div>
-
+    <button onclick="login()">ログイン</button>
+    <div id="error"></div>
 </div>
 
-
 <script>
-
 async function login() {
+    const password = document.getElementById("password").value;
 
-    const password =
-        document.getElementById("password").value;
-
-    const response =
-        await fetch("/login", {
-
-            method: "POST",
-
-            headers: {
-                "Content-Type": "application/json"
-            },
-
-            body: JSON.stringify({
-                password: password
-            })
-        });
-
+    const response = await fetch("/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: password })
+    });
 
     if (response.ok) {
-
         location.href = "/control";
-
     } else {
-
-        document.getElementById("error").innerText =
-            "パスワードが違います";
-
+        document.getElementById("error").innerText = "パスワードが違います";
     }
 }
 
-
-document
-    .getElementById("password")
-    .addEventListener("keydown", function(event) {
-
-        if (event.key === "Enter") {
-            login();
-        }
-
-    });
-
+document.getElementById("password").addEventListener("keydown", function(event) {
+    if (event.key === "Enter") {
+        login();
+    }
+});
 </script>
-
 </body>
 </html>
 """
@@ -397,19 +432,32 @@ def control(request: Request):
     return """
 <!DOCTYPE html>
 <html lang="ja">
-
 <head>
-
 <meta charset="UTF-8">
-
-<meta
-    name="viewport"
-    content="width=device-width, initial-scale=1.0"
->
-
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>エアコン操作</title>
 
 <style>
+:root {
+    --bg: #f7f8fc;
+    --card: rgba(255,255,255,0.94);
+    --text: #2f3441;
+    --sub: #7d8597;
+    --line: #e8ebf3;
+    --shadow: 0 20px 50px rgba(115, 130, 170, 0.12);
+
+    --blue1: #b8c9ff;
+    --blue2: #95afff;
+
+    --green1: #bee7c5;
+    --green2: #99d7a6;
+
+    --pink1: #f7c6c6;
+    --pink2: #efabab;
+
+    --gray1: #eef1f7;
+    --gray2: #e3e7f0;
+}
 
 * {
     box-sizing: border-box;
@@ -417,213 +465,247 @@ def control(request: Request):
 
 body {
     margin: 0;
-    padding: 30px 20px;
-    background: #f5f5f7;
-    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    min-height: 100vh;
+    padding: 20px;
+    background:
+        radial-gradient(circle at top left, #eef3ff 0%, transparent 35%),
+        radial-gradient(circle at bottom right, #fceff4 0%, transparent 28%),
+        var(--bg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    color: var(--text);
 }
 
 .container {
-    max-width: 420px;
-    margin: auto;
-    padding: 30px;
-    background: white;
-    border-radius: 25px;
+    width: 100%;
+    max-width: 460px;
+    margin: 0 auto;
+    background: var(--card);
+    border: 1px solid rgba(255,255,255,0.75);
+    backdrop-filter: blur(12px);
+    border-radius: 30px;
+    box-shadow: var(--shadow);
+    padding: 26px 22px 22px;
+}
+
+.header {
     text-align: center;
-    box-shadow: 0 8px 30px rgba(0,0,0,0.08);
+    margin-bottom: 22px;
 }
 
-h1 {
-    margin-bottom: 30px;
+.header-icon {
+    width: 70px;
+    height: 70px;
+    margin: 0 auto 14px;
+    border-radius: 22px;
+    background: linear-gradient(135deg, #dfe8ff, #f5e8f2);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 32px;
 }
 
-.current-status {
-    background: #f2f2f7;
-    padding: 20px;
-    border-radius: 18px;
-    margin-bottom: 25px;
+.header h1 {
+    margin: 0;
+    font-size: 32px;
+    font-weight: 800;
+    letter-spacing: 0.02em;
+}
+
+.header p {
+    margin: 8px 0 0;
+    font-size: 14px;
+    color: var(--sub);
+}
+
+.status-panel {
+    background: linear-gradient(135deg, #f8f9ff, #f6f5fb);
+    border: 1px solid #eceef8;
+    border-radius: 22px;
+    padding: 20px 18px;
+    margin-bottom: 18px;
 }
 
 .status-title {
-    color: #777;
-    font-size: 14px;
-    margin-bottom: 10px;
+    font-size: 13px;
+    color: var(--sub);
+    margin-bottom: 8px;
 }
 
 #deviceStatus {
-    font-size: 18px;
-    font-weight: bold;
+    font-size: 22px;
+    font-weight: 800;
     line-height: 1.6;
+    word-break: break-word;
+}
+
+.note-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin-bottom: 18px;
+}
+
+.note-card {
+    background: #fbfcff;
+    border: 1px solid var(--line);
+    border-radius: 18px;
+    padding: 14px;
+    text-align: center;
+}
+
+.note-label {
+    font-size: 12px;
+    color: var(--sub);
+    margin-bottom: 6px;
+}
+
+.note-value {
+    font-size: 16px;
+    font-weight: 700;
+}
+
+.button-group {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
 }
 
 button {
     width: 100%;
-    padding: 20px;
-    margin: 10px 0;
+    padding: 18px;
     border: none;
-    border-radius: 16px;
-    font-size: 20px;
+    border-radius: 18px;
+    font-size: 21px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: 0.15s;
+    color: #384055;
 }
 
 button:active {
-    transform: scale(0.97);
+    transform: scale(0.985);
 }
 
 .power {
-    background: #4f7ee8;
-    color: white;
+    background: linear-gradient(135deg, var(--blue1), var(--blue2));
 }
 
 .on {
-    background: #56a85c;
-    color: white;
+    background: linear-gradient(135deg, var(--green1), var(--green2));
 }
 
 .off {
-    background: #df4e3e;
-    color: white;
-}
-
-.logout {
-    margin-top: 30px;
-    background: #ddd;
-    color: black;
-    font-size: 15px;
-    padding: 12px;
+    background: linear-gradient(135deg, var(--pink1), var(--pink2));
 }
 
 #commandStatus {
-    margin-top: 20px;
+    margin-top: 18px;
+    min-height: 24px;
+    text-align: center;
+    color: #5f6678;
+    font-size: 15px;
 }
 
+.logout {
+    margin-top: 18px;
+    padding: 14px;
+    font-size: 15px;
+    background: linear-gradient(135deg, var(--gray1), var(--gray2));
+    color: #4f5667;
+}
+
+.footer-note {
+    margin-top: 14px;
+    text-align: center;
+    color: #97a0b3;
+    font-size: 12px;
+    line-height: 1.6;
+}
 </style>
-
 </head>
-
 
 <body>
 
 <div class="container">
 
-<h1>エアコン操作</h1>
-
-<div class="current-status">
-
-    <div class="status-title">
-        現在の状態
+    <div class="header">
+        <div class="header-icon">❄️</div>
+        <h1>エアコン操作</h1>
+        <p>やさしい色合いのシンプル操作画面</p>
     </div>
 
-    <div id="deviceStatus">
-        読み込み中...
+    <div class="status-panel">
+        <div class="status-title">現在の状態</div>
+        <div id="deviceStatus">読み込み中...</div>
     </div>
 
+    <div class="note-row">
+        <div class="note-card">
+            <div class="note-label">接続</div>
+            <div class="note-value">オンライン</div>
+        </div>
+        <div class="note-card">
+            <div class="note-label">更新</div>
+            <div class="note-value">1秒ごと</div>
+        </div>
+    </div>
+
+    <div class="button-group">
+        <button class="power" onclick="sendCommand('/power')">POWER</button>
+        <button class="on" onclick="sendCommand('/auto-on')">AUTO ON</button>
+        <button class="off" onclick="sendCommand('/auto-off')">AUTO OFF</button>
+    </div>
+
+    <div id="commandStatus">待機中</div>
+
+    <button class="logout" onclick="location.href='/logout'">ログアウト</button>
+
+    <div class="footer-note">
+        状態は自動更新されます
+    </div>
 </div>
-
-
-<button
-    class="power"
-    onclick="sendCommand('/power')"
->
-POWER
-</button>
-
-
-<button
-    class="on"
-    onclick="sendCommand('/auto-on')"
->
-AUTO ON
-</button>
-
-
-<button
-    class="off"
-    onclick="sendCommand('/auto-off')"
->
-AUTO OFF
-</button>
-
-
-<div id="commandStatus">
-待機中
-</div>
-
-
-<button
-    class="logout"
-    onclick="location.href='/logout'"
->
-ログアウト
-</button>
-
-</div>
-
 
 <script>
-
 async function sendCommand(path) {
-
-    const status =
-        document.getElementById("commandStatus");
-
+    const status = document.getElementById("commandStatus");
     status.innerText = "送信中...";
 
-    const response =
-        await fetch(path, {
-            method: "POST"
-        });
-
+    const response = await fetch(path, {
+        method: "POST"
+    });
 
     if (response.status === 401) {
         location.href = "/login";
         return;
     }
-
 
     if (!response.ok) {
         status.innerText = "送信失敗";
         return;
     }
 
-
     const data = await response.json();
-
-    status.innerText =
-        "送信成功: " + data.command;
+    status.innerText = "送信成功: " + data.command;
 }
 
-
 async function updateStatus() {
-
-    const response =
-        await fetch("/status");
-
+    const response = await fetch("/status");
 
     if (response.status === 401) {
         location.href = "/login";
         return;
     }
 
-
     if (!response.ok) {
         return;
     }
 
-
     const data = await response.json();
-
-    document
-        .getElementById("deviceStatus")
-        .innerText = data.status;
+    document.getElementById("deviceStatus").innerText = data.status;
 }
 
-
 updateStatus();
-
-setInterval(
-    updateStatus,
-    1000
-);
-
+setInterval(updateStatus, 1000);
 </script>
 
 </body>
