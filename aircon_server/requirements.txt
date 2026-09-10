@@ -1,4 +1,4 @@
 fastapi
 uvicorn[standard]
 paho-mqtt
-Add-Content requirements.txt "python-dotenv"
+python-dotenv
