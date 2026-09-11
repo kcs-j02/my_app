@@ -1,84 +1,260 @@
+import json
 import os
-import ssl
 import secrets
+import ssl
 import threading
+import time
 from contextlib import asynccontextmanager
 
+import paho.mqtt.client as mqtt
+
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 from starlette.middleware.sessions import SessionMiddleware
-import paho.mqtt.client as mqtt
 
+
+# ============================================================
+# 環境変数
+# ============================================================
 
 load_dotenv()
 
-# =========================
-# 設定
-# =========================
-
 MQTT_BROKER = os.environ["MQTT_BROKER"]
 MQTT_PORT = 8883
+
 MQTT_USERNAME = os.environ["MQTT_USERNAME"]
 MQTT_PASSWORD = os.environ["MQTT_PASSWORD"]
-
-MQTT_COMMAND_TOPIC = "yukimi/sg90"
-MQTT_STATUS_TOPIC = "yukimi/sg90/status"
 
 APP_PASSWORD = os.environ["APP_PASSWORD"]
 SESSION_SECRET = os.environ["SESSION_SECRET"]
 
-latest_status = "まだ状態を受信していません"
+
+# ============================================================
+# MQTT Topic
+# ============================================================
+
+# FastAPI → D1 mini
+MQTT_COMMAND_TOPIC = "yukimi/sg90"
+
+# D1 mini → FastAPI
+MQTT_STATUS_TOPIC = "yukimi/sg90/status"
+
+# D1 mini 生存確認
+MQTT_HEARTBEAT_TOPIC = "yukimi/sg90/heartbeat"
+
+
+# ============================================================
+# 状態
+# ============================================================
+
+latest_status = {
+    "power": "UNKNOWN",
+    "auto": "UNKNOWN",
+    "message": "まだ状態を受信していません",
+}
+
 status_lock = threading.Lock()
 
 mqtt_client = None
 
+# Renderサーバ起動時刻
+SERVER_START_TIME = time.time()
 
-# =========================
-# MQTT
-# =========================
+# D1 miniから最後に通信を受けた時刻
+last_device_seen = None
 
-def on_connect(client, userdata, flags, reason_code, properties):
-    print("MQTT connected:", reason_code)
+
+# ============================================================
+# MQTT 接続時
+# ============================================================
+
+def on_connect(
+    client,
+    userdata,
+    flags,
+    reason_code,
+    properties,
+):
+    print(
+        "MQTT connected:",
+        reason_code
+    )
 
     if reason_code == 0:
-        client.subscribe(MQTT_STATUS_TOPIC)
-        print("Subscribed:", MQTT_STATUS_TOPIC)
+
+        # 状態
+        client.subscribe(
+            MQTT_STATUS_TOPIC,
+            qos=0,
+        )
+
+        # Heartbeat
+        client.subscribe(
+            MQTT_HEARTBEAT_TOPIC,
+            qos=0,
+        )
+
+        print(
+            "Subscribed:",
+            MQTT_STATUS_TOPIC
+        )
+
+        print(
+            "Subscribed:",
+            MQTT_HEARTBEAT_TOPIC
+        )
 
 
-def on_message(client, userdata, msg):
+# ============================================================
+# MQTT 切断時
+# ============================================================
+
+def on_disconnect(
+    client,
+    userdata,
+    disconnect_flags,
+    reason_code,
+    properties,
+):
+    print(
+        "MQTT disconnected:",
+        reason_code
+    )
+
+
+# ============================================================
+# MQTT メッセージ受信
+# ============================================================
+
+def on_message(
+    client,
+    userdata,
+    msg,
+):
     global latest_status
+    global last_device_seen
 
-    text = msg.payload.decode("utf-8", errors="replace")
+    text = msg.payload.decode(
+        "utf-8",
+        errors="replace"
+    )
 
-    print("STATUS RECEIVED:", text)
+    print(
+        "MQTT RX:",
+        msg.topic,
+        text
+    )
 
-    with status_lock:
-        latest_status = text
+    # --------------------------------------------------------
+    # Heartbeat
+    # --------------------------------------------------------
 
+    if msg.topic == MQTT_HEARTBEAT_TOPIC:
+
+        last_device_seen = time.time()
+
+        print(
+            "D1 mini heartbeat received"
+        )
+
+        return
+
+
+    # --------------------------------------------------------
+    # Status
+    # --------------------------------------------------------
+
+    if msg.topic == MQTT_STATUS_TOPIC:
+
+        # 状態通知も生存確認として扱う
+        last_device_seen = time.time()
+
+        try:
+
+            data = json.loads(
+                text
+            )
+
+            new_status = {
+                "power": str(
+                    data.get(
+                        "power",
+                        "UNKNOWN"
+                    )
+                ),
+
+                "auto": str(
+                    data.get(
+                        "auto",
+                        "UNKNOWN"
+                    )
+                ),
+
+                "message": str(
+                    data.get(
+                        "message",
+                        ""
+                    )
+                ),
+            }
+
+        except Exception:
+
+            # 古いマイコンなどが
+            # JSONではなく文字列を返した場合
+            new_status = {
+                "power": "UNKNOWN",
+                "auto": "UNKNOWN",
+                "message": text,
+            }
+
+        with status_lock:
+
+            latest_status = (
+                new_status
+            )
+
+
+# ============================================================
+# FastAPI 起動 / MQTT接続
+# ============================================================
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+
     global mqtt_client
 
     mqtt_client = mqtt.Client(
         mqtt.CallbackAPIVersion.VERSION2
     )
 
+    # HiveMQ認証
     mqtt_client.username_pw_set(
         MQTT_USERNAME,
         MQTT_PASSWORD
     )
 
+    # TLS
     mqtt_client.tls_set_context(
         ssl.create_default_context()
     )
 
     mqtt_client.on_connect = on_connect
     mqtt_client.on_message = on_message
+    mqtt_client.on_disconnect = on_disconnect
 
-    print("Connecting MQTT:", MQTT_BROKER, MQTT_PORT)
+    mqtt_client.reconnect_delay_set(
+        min_delay=1,
+        max_delay=30
+    )
+
+    print(
+        "Connecting MQTT:",
+        MQTT_BROKER,
+        MQTT_PORT
+    )
 
     mqtt_client.connect(
         MQTT_BROKER,
@@ -94,63 +270,96 @@ async def lifespan(app: FastAPI):
     mqtt_client.disconnect()
 
 
-app = FastAPI(lifespan=lifespan)
+# ============================================================
+# FastAPI
+# ============================================================
+
+app = FastAPI(
+    title="Aircon Control Server",
+    lifespan=lifespan,
+)
+
+
+# ============================================================
+# セッション
+# ============================================================
 
 app.add_middleware(
     SessionMiddleware,
     secret_key=SESSION_SECRET,
     https_only=True,
     same_site="lax",
-    max_age=60 * 60 * 24 * 30
+    max_age=60 * 60 * 24 * 30,
 )
 
 
-# =========================
-# 認証
-# =========================
+# ============================================================
+# ログイン
+# ============================================================
 
 class LoginData(BaseModel):
     password: str
 
 
-def require_login(request: Request):
-    if not request.session.get("logged_in"):
+def require_login(
+    request: Request
+):
+    if not request.session.get(
+        "logged_in"
+    ):
         raise HTTPException(
             status_code=401,
             detail="ログインしてください"
         )
 
 
+# ============================================================
+# /
+# ============================================================
+
 @app.get("/")
 def root():
-    return RedirectResponse("/control")
+
+    return RedirectResponse(
+        "/control"
+    )
 
 
-@app.get("/login", response_class=HTMLResponse)
-def login_page(request: Request):
+# ============================================================
+# ログイン画面
+# ============================================================
 
-    if request.session.get("logged_in"):
-        return RedirectResponse("/control")
+@app.get(
+    "/login",
+    response_class=HTMLResponse
+)
+def login_page(
+    request: Request
+):
+
+    if request.session.get(
+        "logged_in"
+    ):
+        return RedirectResponse(
+            "/control"
+        )
 
     return """
 <!DOCTYPE html>
 <html lang="ja">
+
 <head>
+
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>エアコンログイン</title>
+
+<meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0"
+>
+
+<title>エアコン ログイン</title>
 
 <style>
-:root {
-    --bg: #f7f8fc;
-    --card: rgba(255, 255, 255, 0.92);
-    --text: #2f3441;
-    --sub: #7d8597;
-    --line: #e6e9f2;
-    --accent: #9fb8ff;
-    --accent-strong: #7ea0ff;
-    --shadow: 0 20px 50px rgba(115, 130, 170, 0.12);
-}
 
 * {
     box-sizing: border-box;
@@ -158,234 +367,355 @@ def login_page(request: Request):
 
 body {
     margin: 0;
+
     min-height: 100vh;
-    padding: 20px;
+
     display: flex;
-    align-items: center;
     justify-content: center;
-    background:
-        radial-gradient(circle at top left, #eef3ff 0%, transparent 35%),
-        radial-gradient(circle at bottom right, #fceff4 0%, transparent 30%),
-        var(--bg);
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    color: var(--text);
+    align-items: center;
+
+    padding: 20px;
+
+    background: #f5f7fb;
+
+    font-family:
+        -apple-system,
+        BlinkMacSystemFont,
+        "Segoe UI",
+        sans-serif;
+
+    color: #343946;
 }
 
 .card {
     width: 100%;
     max-width: 420px;
-    background: var(--card);
-    border: 1px solid rgba(255,255,255,0.7);
-    backdrop-filter: blur(12px);
+
+    padding: 35px 28px;
+
+    background: white;
+
     border-radius: 28px;
-    box-shadow: var(--shadow);
-    padding: 36px 28px 30px;
+
+    box-shadow:
+        0 15px 45px
+        rgba(0, 0, 0, 0.08);
+
     text-align: center;
 }
 
 .icon {
-    width: 72px;
-    height: 72px;
-    margin: 0 auto 20px;
-    border-radius: 24px;
-    background: linear-gradient(135deg, #dfe8ff, #f5e8f2);
+    width: 70px;
+    height: 70px;
+
+    margin:
+        0 auto
+        18px;
+
     display: flex;
-    align-items: center;
     justify-content: center;
-    font-size: 34px;
+    align-items: center;
+
+    border-radius: 22px;
+
+    background: #edf2ff;
+
+    font-size: 32px;
 }
 
 h1 {
     margin: 0 0 8px;
-    font-size: 32px;
-    font-weight: 800;
-    letter-spacing: 0.02em;
 }
 
-p {
-    margin: 0 0 24px;
-    color: var(--sub);
-    font-size: 15px;
-    line-height: 1.7;
-}
+.description {
+    color: #8991a3;
 
-.input-wrap {
-    text-align: left;
-    margin-bottom: 14px;
-}
-
-.label {
-    font-size: 13px;
-    color: var(--sub);
-    margin-bottom: 8px;
-    display: block;
+    margin-bottom: 25px;
 }
 
 input {
     width: 100%;
-    padding: 16px 18px;
-    border: 1px solid var(--line);
-    border-radius: 16px;
-    background: #fbfcff;
-    font-size: 17px;
-    outline: none;
-    transition: 0.2s;
-}
 
-input:focus {
-    border-color: var(--accent);
-    box-shadow: 0 0 0 4px rgba(159, 184, 255, 0.18);
-    background: white;
+    padding: 17px;
+
+    border:
+        1px solid
+        #e4e8f0;
+
+    border-radius: 15px;
+
+    font-size: 17px;
+
+    outline: none;
 }
 
 button {
     width: 100%;
-    margin-top: 8px;
-    padding: 16px;
-    border: none;
-    border-radius: 16px;
-    background: linear-gradient(135deg, #a8bcff, #8fafee);
-    color: white;
-    font-size: 18px;
-    font-weight: 700;
-    cursor: pointer;
-    transition: 0.15s;
-}
 
-button:active {
-    transform: scale(0.98);
+    margin-top: 15px;
+
+    padding: 17px;
+
+    border: none;
+
+    border-radius: 15px;
+
+    background: #a8bdf2;
+
+    color: white;
+
+    font-size: 18px;
+
+    font-weight: bold;
 }
 
 #error {
-    margin-top: 16px;
     min-height: 24px;
-    font-size: 14px;
-    color: #d96b7c;
+
+    margin-top: 15px;
+
+    color: #d36e79;
 }
+
 </style>
+
 </head>
 
 <body>
+
 <div class="card">
-    <div class="icon">❄️</div>
-    <h1>エアコン</h1>
-    <p>共有パスワードを入力して<br>操作画面へ進んでください</p>
 
-    <div class="input-wrap">
-        <label class="label">パスワード</label>
-        <input id="password" type="password" placeholder="パスワードを入力">
-    </div>
-
-    <button onclick="login()">ログイン</button>
-    <div id="error"></div>
+<div class="icon">
+❄️
 </div>
 
-<script>
-async function login() {
-    const password = document.getElementById("password").value;
+<h1>
+エアコン
+</h1>
 
-    const response = await fetch("/login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password: password })
-    });
+<div class="description">
+共有パスワードを入力してください
+</div>
+
+<input
+    id="password"
+    type="password"
+    placeholder="パスワード"
+>
+
+<button onclick="login()">
+ログイン
+</button>
+
+<div id="error"></div>
+
+</div>
+
+
+<script>
+
+async function login() {
+
+    const password =
+        document
+        .getElementById(
+            "password"
+        )
+        .value;
+
+
+    const response =
+        await fetch(
+            "/login",
+            {
+                method: "POST",
+
+                headers: {
+                    "Content-Type":
+                        "application/json"
+                },
+
+                body:
+                    JSON.stringify({
+                        password: password
+                    })
+            }
+        );
+
 
     if (response.ok) {
-        location.href = "/control";
+
+        location.href =
+            "/control";
+
     } else {
-        document.getElementById("error").innerText = "パスワードが違います";
+
+        document
+            .getElementById(
+                "error"
+            )
+            .innerText =
+                "パスワードが違います";
     }
 }
 
-document.getElementById("password").addEventListener("keydown", function(event) {
-    if (event.key === "Enter") {
-        login();
-    }
-});
+
+document
+    .getElementById(
+        "password"
+    )
+    .addEventListener(
+        "keydown",
+        function(event) {
+
+            if (
+                event.key === "Enter"
+            ) {
+                login();
+            }
+        }
+    );
+
 </script>
+
 </body>
+
 </html>
 """
 
 
+# ============================================================
+# ログイン処理
+# ============================================================
+
 @app.post("/login")
-def login(data: LoginData, request: Request):
+def login(
+    data: LoginData,
+    request: Request,
+):
 
     if not secrets.compare_digest(
         data.password,
         APP_PASSWORD
     ):
+
         raise HTTPException(
             status_code=401,
             detail="パスワードが違います"
         )
 
-    request.session["logged_in"] = True
+    request.session[
+        "logged_in"
+    ] = True
 
     return {
         "status": "ok"
     }
 
 
+# ============================================================
+# ログアウト
+# ============================================================
+
 @app.get("/logout")
-def logout(request: Request):
+def logout(
+    request: Request
+):
 
     request.session.clear()
 
-    return RedirectResponse("/login")
+    return RedirectResponse(
+        "/login"
+    )
 
 
-# =========================
-# エアコン API
-# =========================
+# ============================================================
+# MQTT Publish
+# ============================================================
 
-def send_mqtt(payload: str):
+def send_mqtt(
+    payload: str
+):
 
     if mqtt_client is None:
+
         raise HTTPException(
             status_code=503,
             detail="MQTT接続準備中"
         )
 
+
     if not mqtt_client.is_connected():
+
         raise HTTPException(
             status_code=503,
             detail="MQTTに接続されていません"
         )
 
+
     result = mqtt_client.publish(
         MQTT_COMMAND_TOPIC,
-        payload
+        payload,
+        qos=0
     )
 
-    if result.rc != mqtt.MQTT_ERR_SUCCESS:
+
+    if (
+        result.rc
+        != mqtt.MQTT_ERR_SUCCESS
+    ):
+
         raise HTTPException(
             status_code=500,
             detail="MQTT送信失敗"
         )
 
-    print("MQTT SEND:", payload)
 
+    print(
+        "MQTT SEND:",
+        MQTT_COMMAND_TOPIC,
+        payload
+    )
+
+
+# ============================================================
+# Status API
+# ============================================================
 
 @app.get("/status")
-def get_status(request: Request):
+def get_status(
+    request: Request
+):
 
-    require_login(request)
+    require_login(
+        request
+    )
 
     with status_lock:
-        status = latest_status
 
-    return {
-        "status": status
-    }
+        current = (
+            latest_status.copy()
+        )
 
+    return current
+
+
+# ============================================================
+# POWER
+# ============================================================
 
 @app.post("/power")
-def power(request: Request):
+def power(
+    request: Request
+):
 
-    require_login(request)
+    require_login(
+        request
+    )
 
-    send_mqtt("power")
+    send_mqtt(
+        "power"
+    )
 
     return {
         "status": "ok",
@@ -393,12 +723,22 @@ def power(request: Request):
     }
 
 
+# ============================================================
+# AUTO ON
+# ============================================================
+
 @app.post("/auto-on")
-def auto_on(request: Request):
+def auto_on(
+    request: Request
+):
 
-    require_login(request)
+    require_login(
+        request
+    )
 
-    send_mqtt("auto_on")
+    send_mqtt(
+        "auto_on"
+    )
 
     return {
         "status": "ok",
@@ -406,12 +746,22 @@ def auto_on(request: Request):
     }
 
 
+# ============================================================
+# AUTO OFF
+# ============================================================
+
 @app.post("/auto-off")
-def auto_off(request: Request):
+def auto_off(
+    request: Request
+):
 
-    require_login(request)
+    require_login(
+        request
+    )
 
-    send_mqtt("auto_off")
+    send_mqtt(
+        "auto_off"
+    )
 
     return {
         "status": "ok",
@@ -419,295 +769,1227 @@ def auto_off(request: Request):
     }
 
 
-# =========================
+# ============================================================
+# HEALTH API
+# ============================================================
+
+@app.get("/health")
+def health(
+    request: Request
+):
+
+    require_login(
+        request
+    )
+
+
+    now = time.time()
+
+
+    # --------------------------------------------------------
+    # Render / FastAPI uptime
+    # --------------------------------------------------------
+
+    uptime_seconds = int(
+        now
+        - SERVER_START_TIME
+    )
+
+
+    # --------------------------------------------------------
+    # MQTT Broker
+    # --------------------------------------------------------
+
+    mqtt_ok = (
+
+        mqtt_client
+        is not None
+
+        and
+
+        mqtt_client.is_connected()
+    )
+
+
+    # --------------------------------------------------------
+    # D1 mini
+    # --------------------------------------------------------
+
+    device_online = False
+
+    last_seen_seconds = None
+
+
+    if last_device_seen is not None:
+
+        last_seen_seconds = int(
+            now
+            - last_device_seen
+        )
+
+        # D1 miniは30秒に1回Heartbeat
+        # 90秒以上来なければOFFLINE
+        device_online = (
+            last_seen_seconds
+            < 90
+        )
+
+
+    with status_lock:
+
+        current = (
+            latest_status.copy()
+        )
+
+
+    return {
+
+        "server":
+            "online",
+
+        "mqtt":
+            "connected"
+            if mqtt_ok
+            else "disconnected",
+
+        "device":
+            "online"
+            if device_online
+            else "offline",
+
+        "last_seen_seconds":
+            last_seen_seconds,
+
+        "uptime_seconds":
+            uptime_seconds,
+
+        "power":
+            current.get(
+                "power",
+                "UNKNOWN"
+            ),
+
+        "auto":
+            current.get(
+                "auto",
+                "UNKNOWN"
+            ),
+
+        "message":
+            current.get(
+                "message",
+                ""
+            ),
+    }
+
+
+# ============================================================
 # 操作画面
-# =========================
+# ============================================================
 
-@app.get("/control", response_class=HTMLResponse)
-def control(request: Request):
+@app.get(
+    "/control",
+    response_class=HTMLResponse
+)
+def control(
+    request: Request
+):
 
-    if not request.session.get("logged_in"):
-        return RedirectResponse("/login")
+    if not request.session.get(
+        "logged_in"
+    ):
+
+        return RedirectResponse(
+            "/login"
+        )
+
 
     return """
 <!DOCTYPE html>
 <html lang="ja">
+
 <head>
+
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0"
+>
+
 <title>エアコン操作</title>
 
+
 <style>
-:root {
-    --bg: #f7f8fc;
-    --card: rgba(255,255,255,0.94);
-    --text: #2f3441;
-    --sub: #7d8597;
-    --line: #e8ebf3;
-    --shadow: 0 20px 50px rgba(115, 130, 170, 0.12);
-
-    --blue1: #b8c9ff;
-    --blue2: #95afff;
-
-    --green1: #bee7c5;
-    --green2: #99d7a6;
-
-    --pink1: #f7c6c6;
-    --pink2: #efabab;
-
-    --gray1: #eef1f7;
-    --gray2: #e3e7f0;
-}
 
 * {
     box-sizing: border-box;
 }
 
 body {
+
     margin: 0;
+
     min-height: 100vh;
+
     padding: 20px;
-    background:
-        radial-gradient(circle at top left, #eef3ff 0%, transparent 35%),
-        radial-gradient(circle at bottom right, #fceff4 0%, transparent 28%),
-        var(--bg);
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    color: var(--text);
+
+    background: #f5f7fb;
+
+    font-family:
+        -apple-system,
+        BlinkMacSystemFont,
+        "Segoe UI",
+        sans-serif;
+
+    color: #343946;
 }
+
 
 .container {
+
     width: 100%;
+
     max-width: 460px;
-    margin: 0 auto;
-    background: var(--card);
-    border: 1px solid rgba(255,255,255,0.75);
-    backdrop-filter: blur(12px);
-    border-radius: 30px;
-    box-shadow: var(--shadow);
-    padding: 26px 22px 22px;
+
+    margin: auto;
+
+    padding: 25px;
+
+    background: white;
+
+    border-radius: 28px;
+
+    box-shadow:
+        0 15px 45px
+        rgba(0, 0, 0, 0.08);
 }
 
-.header {
+
+h1 {
+
     text-align: center;
-    margin-bottom: 22px;
+
+    margin-top: 5px;
 }
 
-.header-icon {
-    width: 70px;
-    height: 70px;
-    margin: 0 auto 14px;
-    border-radius: 22px;
-    background: linear-gradient(135deg, #dfe8ff, #f5e8f2);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 32px;
+
+.subtitle {
+
+    text-align: center;
+
+    color: #8991a3;
+
+    margin-bottom: 25px;
 }
 
-.header h1 {
-    margin: 0;
-    font-size: 32px;
-    font-weight: 800;
-    letter-spacing: 0.02em;
-}
 
-.header p {
-    margin: 8px 0 0;
-    font-size: 14px;
-    color: var(--sub);
-}
+.status-grid {
 
-.status-panel {
-    background: linear-gradient(135deg, #f8f9ff, #f6f5fb);
-    border: 1px solid #eceef8;
-    border-radius: 22px;
-    padding: 20px 18px;
-    margin-bottom: 18px;
-}
-
-.status-title {
-    font-size: 13px;
-    color: var(--sub);
-    margin-bottom: 8px;
-}
-
-#deviceStatus {
-    font-size: 22px;
-    font-weight: 800;
-    line-height: 1.6;
-    word-break: break-word;
-}
-
-.note-row {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+
+    grid-template-columns:
+        1fr 1fr;
+
     gap: 12px;
-    margin-bottom: 18px;
+
+    margin-bottom: 15px;
 }
 
-.note-card {
-    background: #fbfcff;
-    border: 1px solid var(--line);
+
+.status-card {
+
+    padding: 18px;
+
+    background: #f7f8fc;
+
     border-radius: 18px;
-    padding: 14px;
+
     text-align: center;
 }
 
-.note-label {
+
+.label {
+
     font-size: 12px;
-    color: var(--sub);
-    margin-bottom: 6px;
+
+    color: #8991a3;
+
+    margin-bottom: 7px;
 }
 
-.note-value {
-    font-size: 16px;
+
+.value {
+
+    font-size: 25px;
+
+    font-weight: 800;
+}
+
+
+.message-box {
+
+    padding: 17px;
+
+    margin-bottom: 18px;
+
+    background: #f7f8fc;
+
+    border-radius: 18px;
+}
+
+
+.message-label {
+
+    font-size: 12px;
+
+    color: #8991a3;
+
+    margin-bottom: 7px;
+}
+
+
+#messageStatus {
+
     font-weight: 700;
+
+    line-height: 1.5;
 }
 
-.button-group {
-    display: flex;
-    flex-direction: column;
-    gap: 14px;
-}
 
 button {
+
     width: 100%;
+
     padding: 18px;
+
+    margin-bottom: 12px;
+
     border: none;
-    border-radius: 18px;
-    font-size: 21px;
+
+    border-radius: 17px;
+
+    font-size: 19px;
+
     font-weight: 700;
-    cursor: pointer;
-    transition: 0.15s;
-    color: #384055;
 }
 
-button:active {
-    transform: scale(0.985);
-}
 
 .power {
-    background: linear-gradient(135deg, var(--blue1), var(--blue2));
+
+    background: #bacaf2;
+
+    color: #394152;
 }
 
-.on {
-    background: linear-gradient(135deg, var(--green1), var(--green2));
+
+.auto-on {
+
+    background: #c4e5cb;
+
+    color: #394152;
 }
 
-.off {
-    background: linear-gradient(135deg, var(--pink1), var(--pink2));
+
+.auto-off {
+
+    background: #f1c7cc;
+
+    color: #394152;
 }
 
-#commandStatus {
-    margin-top: 18px;
-    min-height: 24px;
-    text-align: center;
-    color: #5f6678;
+
+.health {
+
+    margin-top: 12px;
+
+    background: #ebeef5;
+
+    color: #4d5565;
+
     font-size: 15px;
 }
+
 
 .logout {
-    margin-top: 18px;
-    padding: 14px;
-    font-size: 15px;
-    background: linear-gradient(135deg, var(--gray1), var(--gray2));
-    color: #4f5667;
+
+    background: #f1f2f5;
+
+    color: #656c79;
+
+    font-size: 14px;
 }
 
-.footer-note {
-    margin-top: 14px;
+
+#commandStatus {
+
+    min-height: 25px;
+
+    margin-bottom: 12px;
+
     text-align: center;
-    color: #97a0b3;
-    font-size: 12px;
-    line-height: 1.6;
+
+    color: #687184;
 }
+
 </style>
+
 </head>
+
 
 <body>
 
 <div class="container">
 
-    <div class="header">
-        <div class="header-icon">❄️</div>
-        <h1>エアコン操作</h1>
-        <p>やさしい色合いのシンプル操作画面</p>
-    </div>
+<h1>
+エアコン操作
+</h1>
 
-    <div class="status-panel">
-        <div class="status-title">現在の状態</div>
-        <div id="deviceStatus">読み込み中...</div>
-    </div>
-
-    <div class="note-row">
-        <div class="note-card">
-            <div class="note-label">接続</div>
-            <div class="note-value">オンライン</div>
-        </div>
-        <div class="note-card">
-            <div class="note-label">更新</div>
-            <div class="note-value">1秒ごと</div>
-        </div>
-    </div>
-
-    <div class="button-group">
-        <button class="power" onclick="sendCommand('/power')">POWER</button>
-        <button class="on" onclick="sendCommand('/auto-on')">AUTO ON</button>
-        <button class="off" onclick="sendCommand('/auto-off')">AUTO OFF</button>
-    </div>
-
-    <div id="commandStatus">待機中</div>
-
-    <button class="logout" onclick="location.href='/logout'">ログアウト</button>
-
-    <div class="footer-note">
-        状態は自動更新されます
-    </div>
+<div class="subtitle">
+Remote Air Conditioner
 </div>
 
+
+<div class="status-grid">
+
+<div class="status-card">
+
+<div class="label">
+電源
+</div>
+
+<div
+    id="powerStatus"
+    class="value"
+>
+--
+</div>
+
+</div>
+
+
+<div class="status-card">
+
+<div class="label">
+自動
+</div>
+
+<div
+    id="autoStatus"
+    class="value"
+>
+--
+</div>
+
+</div>
+
+</div>
+
+
+<div class="message-box">
+
+<div class="message-label">
+現在の状態
+</div>
+
+<div id="messageStatus">
+読み込み中...
+</div>
+
+</div>
+
+
+<button
+    class="power"
+    onclick="sendCommand('/power')"
+>
+POWER
+</button>
+
+
+<button
+    class="auto-on"
+    onclick="sendCommand('/auto-on')"
+>
+AUTO ON
+</button>
+
+
+<button
+    class="auto-off"
+    onclick="sendCommand('/auto-off')"
+>
+AUTO OFF
+</button>
+
+
+<div id="commandStatus">
+待機中
+</div>
+
+
+<button
+    class="health"
+    onclick="location.href='/health-page'"
+>
+システム状況
+</button>
+
+
+<button
+    class="logout"
+    onclick="location.href='/logout'"
+>
+ログアウト
+</button>
+
+</div>
+
+
 <script>
-async function sendCommand(path) {
-    const status = document.getElementById("commandStatus");
-    status.innerText = "送信中...";
 
-    const response = await fetch(path, {
-        method: "POST"
-    });
+async function sendCommand(
+    path
+) {
 
-    if (response.status === 401) {
-        location.href = "/login";
+    const commandStatus =
+        document
+            .getElementById(
+                "commandStatus"
+            );
+
+
+    commandStatus.innerText =
+        "送信中...";
+
+
+    const response =
+        await fetch(
+            path,
+            {
+                method: "POST"
+            }
+        );
+
+
+    if (
+        response.status
+        === 401
+    ) {
+
+        location.href =
+            "/login";
+
         return;
     }
+
 
     if (!response.ok) {
-        status.innerText = "送信失敗";
+
+        commandStatus.innerText =
+            "送信失敗";
+
         return;
     }
 
-    const data = await response.json();
-    status.innerText = "送信成功: " + data.command;
+
+    const data =
+        await response.json();
+
+
+    commandStatus.innerText =
+        "送信成功: "
+        + data.command;
+
+
+    setTimeout(
+        updateStatus,
+        300
+    );
 }
+
 
 async function updateStatus() {
-    const response = await fetch("/status");
 
-    if (response.status === 401) {
-        location.href = "/login";
+    const response =
+        await fetch(
+            "/status"
+        );
+
+
+    if (
+        response.status
+        === 401
+    ) {
+
+        location.href =
+            "/login";
+
         return;
     }
+
 
     if (!response.ok) {
+
         return;
     }
 
-    const data = await response.json();
-    document.getElementById("deviceStatus").innerText = data.status;
+
+    const data =
+        await response.json();
+
+
+    document
+        .getElementById(
+            "powerStatus"
+        )
+        .innerText =
+            data.power;
+
+
+    document
+        .getElementById(
+            "autoStatus"
+        )
+        .innerText =
+            data.auto;
+
+
+    document
+        .getElementById(
+            "messageStatus"
+        )
+        .innerText =
+            data.message;
 }
 
+
 updateStatus();
-setInterval(updateStatus, 1000);
+
+
+setInterval(
+    updateStatus,
+    1000
+);
+
 </script>
 
 </body>
+
+</html>
+"""
+
+
+# ============================================================
+# システム状況画面
+# ============================================================
+
+@app.get(
+    "/health-page",
+    response_class=HTMLResponse
+)
+def health_page(
+    request: Request
+):
+
+    if not request.session.get(
+        "logged_in"
+    ):
+
+        return RedirectResponse(
+            "/login"
+        )
+
+
+    return """
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+
+<meta charset="UTF-8">
+
+<meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0"
+>
+
+<title>システム状況</title>
+
+<style>
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+
+    margin: 0;
+
+    min-height: 100vh;
+
+    padding: 20px;
+
+    background: #f5f7fb;
+
+    font-family:
+        -apple-system,
+        BlinkMacSystemFont,
+        "Segoe UI",
+        sans-serif;
+
+    color: #343946;
+}
+
+
+.container {
+
+    width: 100%;
+
+    max-width: 460px;
+
+    margin: auto;
+
+    padding: 25px;
+
+    background: white;
+
+    border-radius: 28px;
+
+    box-shadow:
+        0 15px 45px
+        rgba(0,0,0,0.08);
+}
+
+
+h1 {
+
+    text-align: center;
+
+    margin:
+        5px 0
+        25px;
+}
+
+
+.item {
+
+    display: flex;
+
+    justify-content:
+        space-between;
+
+    align-items: center;
+
+    padding:
+        18px 4px;
+
+    border-bottom:
+        1px solid #edf0f5;
+}
+
+
+.label {
+
+    color: #7b8392;
+}
+
+
+.value {
+
+    font-weight: 700;
+}
+
+
+.online {
+
+    color: #63a876;
+}
+
+
+.offline {
+
+    color: #cf7079;
+}
+
+
+.status-grid {
+
+    display: grid;
+
+    grid-template-columns:
+        1fr 1fr;
+
+    gap: 12px;
+
+    margin-top: 20px;
+}
+
+
+.status-card {
+
+    padding: 17px;
+
+    background: #f7f8fc;
+
+    border-radius: 17px;
+
+    text-align: center;
+}
+
+
+.status-label {
+
+    color: #8991a3;
+
+    font-size: 12px;
+
+    margin-bottom: 7px;
+}
+
+
+.status-value {
+
+    font-size: 25px;
+
+    font-weight: 800;
+}
+
+
+.message {
+
+    margin-top: 15px;
+
+    padding: 16px;
+
+    background: #f7f8fc;
+
+    border-radius: 17px;
+
+    line-height: 1.5;
+
+    color: #5e6675;
+}
+
+
+button {
+
+    width: 100%;
+
+    margin-top: 22px;
+
+    padding: 15px;
+
+    border: none;
+
+    border-radius: 15px;
+
+    background: #e9edf5;
+
+    color: #4c5565;
+
+    font-size: 15px;
+}
+
+</style>
+
+</head>
+
+
+<body>
+
+<div class="container">
+
+<h1>
+システム状況
+</h1>
+
+
+<div class="item">
+
+<span class="label">
+Web Server
+</span>
+
+<span
+    id="server"
+    class="value"
+>
+--
+</span>
+
+</div>
+
+
+<div class="item">
+
+<span class="label">
+MQTT Broker
+</span>
+
+<span
+    id="mqtt"
+    class="value"
+>
+--
+</span>
+
+</div>
+
+
+<div class="item">
+
+<span class="label">
+D1 mini
+</span>
+
+<span
+    id="device"
+    class="value"
+>
+--
+</span>
+
+</div>
+
+
+<div class="item">
+
+<span class="label">
+最終確認
+</span>
+
+<span
+    id="lastSeen"
+    class="value"
+>
+--
+</span>
+
+</div>
+
+
+<div class="item">
+
+<span class="label">
+Server Uptime
+</span>
+
+<span
+    id="uptime"
+    class="value"
+>
+--
+</span>
+
+</div>
+
+
+<div class="status-grid">
+
+<div class="status-card">
+
+<div class="status-label">
+電源
+</div>
+
+<div
+    id="power"
+    class="status-value"
+>
+--
+</div>
+
+</div>
+
+
+<div class="status-card">
+
+<div class="status-label">
+自動
+</div>
+
+<div
+    id="auto"
+    class="status-value"
+>
+--
+</div>
+
+</div>
+
+</div>
+
+
+<div
+    id="message"
+    class="message"
+>
+--
+</div>
+
+
+<button
+    onclick="location.href='/control'"
+>
+操作画面へ戻る
+</button>
+
+
+</div>
+
+
+<script>
+
+
+function setColor(
+    element,
+    good
+) {
+
+    element.classList.remove(
+        "online",
+        "offline"
+    );
+
+
+    element.classList.add(
+        good
+        ? "online"
+        : "offline"
+    );
+}
+
+
+function formatUptime(
+    seconds
+) {
+
+    const days =
+        Math.floor(
+            seconds
+            / 86400
+        );
+
+
+    const hours =
+        Math.floor(
+            (seconds % 86400)
+            / 3600
+        );
+
+
+    const minutes =
+        Math.floor(
+            (seconds % 3600)
+            / 60
+        );
+
+
+    if (days > 0) {
+
+        return (
+            days
+            + "日 "
+            + hours
+            + "時間 "
+            + minutes
+            + "分"
+        );
+    }
+
+
+    return (
+        hours
+        + "時間 "
+        + minutes
+        + "分"
+    );
+}
+
+
+async function updateHealth() {
+
+    const response =
+        await fetch(
+            "/health"
+        );
+
+
+    if (
+        response.status
+        === 401
+    ) {
+
+        location.href =
+            "/login";
+
+        return;
+    }
+
+
+    if (!response.ok) {
+
+        return;
+    }
+
+
+    const data =
+        await response.json();
+
+
+    # server
+
+    const server =
+        document
+            .getElementById(
+                "server"
+            );
+
+
+    server.innerText =
+        "● ONLINE";
+
+
+    setColor(
+        server,
+        true
+    );
+
+
+    # MQTT
+
+    const mqtt =
+        document
+            .getElementById(
+                "mqtt"
+            );
+
+
+    const mqttOk =
+        data.mqtt
+        ===
+        "connected";
+
+
+    mqtt.innerText =
+        mqttOk
+        ? "● CONNECTED"
+        : "● DISCONNECTED";
+
+
+    setColor(
+        mqtt,
+        mqttOk
+    );
+
+
+    # Device
+
+    const device =
+        document
+            .getElementById(
+                "device"
+            );
+
+
+    const deviceOk =
+        data.device
+        ===
+        "online";
+
+
+    device.innerText =
+        deviceOk
+        ? "● ONLINE"
+        : "● OFFLINE";
+
+
+    setColor(
+        device,
+        deviceOk
+    );
+
+
+    # Last Seen
+
+    const lastSeen =
+        document
+            .getElementById(
+                "lastSeen"
+            );
+
+
+    if (
+        data.last_seen_seconds
+        === null
+    ) {
+
+        lastSeen.innerText =
+            "未受信";
+
+    } else {
+
+        lastSeen.innerText =
+            data.last_seen_seconds
+            + "秒前";
+    }
+
+
+    # Uptime
+
+    document
+        .getElementById(
+            "uptime"
+        )
+        .innerText =
+            formatUptime(
+                data.uptime_seconds
+            );
+
+
+    # Power
+
+    document
+        .getElementById(
+            "power"
+        )
+        .innerText =
+            data.power;
+
+
+    # Auto
+
+    document
+        .getElementById(
+            "auto"
+        )
+        .innerText =
+            data.auto;
+
+
+    # Message
+
+    document
+        .getElementById(
+            "message"
+        )
+        .innerText =
+            data.message;
+}
+
+
+updateHealth();
+
+
+setInterval(
+    updateHealth,
+    5000
+);
+
+</script>
+
+</body>
+
 </html>
 """
